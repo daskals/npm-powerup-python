@@ -16,6 +16,27 @@ class ModelToolError(Exception):
     pass
 
 
+def bundled_models(app_folder: Optional[os.PathLike] = None) -> dict[str, Path]:
+    """Battery models that ship with the nPM PowerUP app, by name.
+
+    The models are Nordic's files and are not part of this package. They
+    are read from a copy of the app: ``app_folder``, the ``NPM_POWERUP_APP``
+    environment variable, or the ``reference`` submodule of this repository.
+    """
+    candidates = [
+        app_folder,
+        os.environ.get("NPM_POWERUP_APP"),
+        Path(__file__).resolve().parent.parent / "reference" / "pc-nrfconnect-npm",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        folder = Path(candidate) / "resources" / "batteryModels" / "npm1300"
+        if folder.is_dir():
+            return {path.stem: path for path in sorted(folder.rglob("*.json"))}
+    return {}
+
+
 @dataclass(frozen=True)
 class BatteryModel:
     json: str

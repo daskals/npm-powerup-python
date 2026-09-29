@@ -46,13 +46,32 @@ pip install .
 
 ## Command line
 
+| Command | What it does | In the app |
+|---|---|---|
+| `ports` | Lists connected EKs | Select Device |
+| `info` | Versions, charger state, Fuel Gauge Board | Connection Status |
+| `show` | Every setting, and the error logs | All tabs |
+| `export config.json` | Saves the configuration | Export Configuration |
+| `export config.overlay` | Saves it as a Zephyr overlay | Export Configuration |
+| `load config.json` | Writes a configuration to the EK | Load Configuration |
+| `overlay config.json out.overlay` | Converts a saved configuration, no EK needed | |
+| `shell <command>` | Sends one shell command | Open Serial Terminal |
+| `reset` | Restarts the EK firmware | Reset Device |
+| `events <folder>` | Records everything the EK reports | Record Events |
+| `log out.csv` | Records battery measurements | Battery Status |
+| `plot out.csv` | Graphs a recording, needs `matplotlib` | Graph |
+| `models` | Lists bundled models and those on the EK | Profiles |
+| `write-model <model>` | Writes a battery model to the EK | Write Model |
+| `profile <name> <folder>` | Profiles a battery | Profile Battery |
+| `model <csv>` | Generates a model from a recording | Profiles |
+| `ship-mode`, `hibernate` | Powers the PMIC down | System Features |
+
 ```
-python -m npm_powerup ports
 python -m npm_powerup info
-python -m npm_powerup shell npmx charger status all get
-python -m npm_powerup log measurements.csv --duration 600
-python -m npm_powerup profile MyCell profiles --capacity 800 --vterm 4.2 --vcutoff 3.0
-python -m npm_powerup model profiles/MyCell/profile_1/MyCell_800mAh_Tp25.csv
+python -m npm_powerup export config.overlay
+python -m npm_powerup log measurements.csv --duration 600 --fuel-gauge
+python -m npm_powerup write-model "LP803448 (1350 mAh)"
+python -m npm_powerup profile MyCell profiles --capacity 1350 --temperature 25 5 45
 ```
 
 Add `--port COM7` before the command to choose a port by hand.
@@ -60,24 +79,78 @@ Add `--port COM7` before the command to choose a port by hand.
 ## Python
 
 ```python
-from npm_powerup import Npm1300, BatteryProfile, ProfilingRun, record
+from npm_powerup import (
+    Npm1300, BatteryProfile, ProfilingRun, record, read_configuration, overlay,
+)
 
 with Npm1300() as ek:
     print(ek.app_version(), ek.read_charging_state().describe())
 
+    # Charger
     ek.set_vterm(4.2)
     ek.set_ichg(400)
+    ek.set_jeita(cold=0, cool=10, warm=45, hot=60)
     ek.set_charger_enabled(True)
 
+    # Regulators
+    ek.set_buck_voltage(0, 1.8)
+    ek.set_buck_mode_control(0, "PWM")
+    ek.set_ldo_voltage(0, 2.5)
+    ek.set_ldo_enabled(0, True)
+
+    # GPIOs, LEDs and system features
+    ek.set_gpio_mode(0, "Output interrupt")
+    ek.set_led_mode(0, "Charging")
+    ek.set_timer(mode="Wake-up", prescaler="Fast", period=1000)
+    ek.set_power_failure(enabled=True, threshold=2.8)
+    ek.set_vbus_current_limit(1.5)
+
+    # Measurements
     ek.on_adc_sample(lambda s: print(s.vbat_v, s.ibat_ma, s.tbat_c))
     record(ek, "measurements.csv", duration_s=60)
 
+    # Configuration
+    open("config.overlay", "w").write(overlay(read_configuration(ek)))
+
+    # Battery profiling
     profile = BatteryProfile("MyCell", capacity_mah=800, v_term=4.2, v_cutoff=3.0)
     result = ProfilingRun(ek, profile, "profiles").run()
     print(result.outcome, result.csv_path)
 ```
 
+Each setting has a matching reader, and `read_charger()`, `read_buck(i)`,
+`read_ldo(i)` and `read_gpio(i)` return a whole group. Values outside the
+range the app allows raise `ValueError` before anything is sent.
+
 Listeners run on the reader thread. They must not send commands to the EK.
+
+### Buck 2
+
+Buck 2 powers the link between the EK controller and the PMIC. Switching it
+off, or setting it to 1.6 V or less, can cut the connection. Where the app asks
+for confirmation, this package needs `force=True`.
+
+## Coverage of Nordic's tutorial videos
+
+The package was checked against the three nPM PowerUP tutorial videos, which
+show version 1.2.1 of the app.
+
+| Video | Shown | Here |
+|---|---|---|
+| 1 | Connecting, battery status, fuel gauge | `info`, `log`, `set_fuel_gauge_enabled` |
+| 1 | Selecting and writing a battery model | `models`, `write-model`, `set_active_battery_model` |
+| 1 | Charger tab, JEITA, thermal regulation | `set_vterm`, `set_jeita`, `set_die_temperature_limits` and others |
+| 1 | Regulators tab | `set_buck_*`, `set_ldo_*` |
+| 1 | GPIOs and LEDs tab | `set_gpio_*`, `set_led_mode` |
+| 1 | System features, ship mode, error logs | `set_timer`, `set_power_failure`, `enter_ship_mode`, `error_logs` |
+| 1 | Graph tab | `plot` |
+| 1 | Export, load, serial terminal, reset, record events | `export`, `load`, `shell`, `reset`, `events` |
+| 2 | Exporting an overlay for a Zephyr application | `export config.overlay`, `overlay` |
+| 2 | Configuring without an EK connected | `overlay` from a saved `.json` |
+| 3 | Profiling at several temperatures, model generation | `profile`, `model` |
+
+Not covered, as they happen outside the app: wiring the EK to a development
+kit, and building and flashing the Zephyr application in part 2.
 
 ## Battery profiling
 
@@ -126,9 +199,17 @@ Profiles tab can open the project. This has not been verified.
 
 - nPM1300 only. nPM1304, nPM2100 and nPM1012 use different commands.
 - Firmware is not programmed by this package. Use nPM PowerUP for that.
-- Exporting settings as a devicetree overlay is not implemented.
+- The battery health settings added in version 2.2.6 of the app are not
+  implemented.
+- The generated overlay has not been built into a Zephyr application.
 - Time-to-empty and time-to-full are passed through as the firmware reports
   them.
+
+## Battery models
+
+The models bundled with nPM PowerUP are Nordic's files and are not included in
+this repository. `models` and `write-model` read them from the `reference`
+submodule, or from a copy of the app named by `NPM_POWERUP_APP`.
 
 ## Reference
 

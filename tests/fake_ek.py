@@ -16,6 +16,59 @@ PROMPT = "shell:~$ "
 ERASE_LINE = "\x1b[2K\r"
 COLUMNS = 80
 
+# What the settings read as before anything is set.
+DEFAULTS = {
+    "npmx charger termination_voltage normal": "4200",
+    "npmx charger termination_voltage warm": "3600",
+    "npmx charger charging_current": "400000",
+    "npmx charger termination_current": "10",
+    "npmx charger trickle_voltage": "2900",
+    "npmx charger module recharge": "1",
+    "npm_adc fullscale": "1000",
+    "npmx adc ntc type": "10000",
+    "npmx adc ntc beta": "3380",
+    "npmx charger ntc_temperature cold": "0",
+    "npmx charger ntc_temperature cool": "10",
+    "npmx charger ntc_temperature warm": "45",
+    "npmx charger ntc_temperature hot": "60",
+    "npmx charger die_temp stop": "110",
+    "npmx charger die_temp resume": "100",
+    "npmx buck voltage normal 0": "1800",
+    "npmx buck voltage normal 1": "3000",
+    "npmx buck voltage retention 0": "1200",
+    "npmx buck voltage retention 1": "1800",
+    "npmx buck status 0": "1",
+    "npmx buck status 1": "1",
+    "npmx buck vout_select 0": "1",
+    "npmx buck vout_select 1": "1",
+    "powerup_buck mode 0": "Auto",
+    "powerup_buck mode 1": "Auto",
+    "npmx buck gpio on_off index 0": "-1",
+    "npmx buck gpio on_off index 1": "-1",
+    "npmx buck gpio retention index 0": "-1",
+    "npmx buck gpio retention index 1": "-1",
+    "npmx ldsw ldo_voltage 0": "1000",
+    "npmx ldsw ldo_voltage 1": "1000",
+    "npmx ldsw soft_start current 0": "25",
+    "npmx ldsw soft_start current 1": "25",
+    "npmx ldsw gpio index 0": "-1",
+    "npmx ldsw gpio index 1": "-1",
+    "npmx gpio config drive 0": "1",
+    "npmx gpio config drive 1": "1",
+    "npmx gpio config drive 2": "1",
+    "npmx gpio config drive 3": "1",
+    "npmx gpio config drive 4": "1",
+    "npmx led mode 0": "0",
+    "npmx led mode 1": "1",
+    "npmx led mode 2": "2",
+    "npmx ship config time": "96",
+    "powerup_ship longpress": "one_button",
+    "npmx pof status": "1",
+    "npmx pof threshold": "2800",
+    "npmx pof polarity": "1",
+    "npmx vbusin current_limit": "500",
+}
+
 
 def stamp(ms: int) -> str:
     hours, rest = divmod(ms, 3_600_000)
@@ -45,6 +98,10 @@ class FakeEk:
         self.app_version = "1.5.2+0"
         self.hw_version = "npm1300ek_nrf5340"
         self.replies: dict[str, str] = {}
+        self.downloading = False
+        self.downloaded = ""
+        self.applied_slot = None
+        self.values: dict[str, str] = dict(DEFAULTS)
 
     # -- serial port interface ----------------------------------------------
 
@@ -81,7 +138,7 @@ class FakeEk:
         self._out.put(text.encode("utf-8"))
 
     def _echo(self, line: str) -> str:
-        if not self.echo:
+        if not self.echo or self.downloading:
             return ""
         if not self.wrap_echo:
             return line
@@ -96,8 +153,9 @@ class FakeEk:
                 self._send("\r\n" + PROMPT)
                 return
             self.written.append(line)
+            echo = self._echo(line)
             reply = self.reply_to(line)
-            self._send(self._echo(line) + "\r\n" + reply + "\r\n" + PROMPT)
+            self._send(echo + "\r\n" + reply + "\r\n" + PROMPT)
 
     def log(self, module: str, message: str, level: str = "inf") -> None:
         with self._lock:
@@ -162,14 +220,38 @@ class FakeEk:
             return f"Value: {int(self.fuel_gauge)}."
         if line == "fuel_gauge get":
             return f"Value: {int(self.fuel_gauge)}."
-        if line == "npmx charger termination_voltage normal get":
-            return "Value: 4200 mv"
-        if "set" in words:
-            return f"Value: {words[-1]}."
+        if line == "fuel_gauge model download begin":
+            self.downloading, self.downloaded = True, ""
+            return "Success: Download started"
+        if line.startswith("fuel_gauge model download apply"):
+            self.downloading, self.applied_slot = False, int(words[-1])
+            return "Success: Model applied"
+        if line == "fuel_gauge model download abort":
+            self.downloading = False
+            return "Success: Download aborted"
+        if line.startswith('fuel_gauge model download "'):
+            chunk = line[len('fuel_gauge model download "'):-1]
+            self.downloaded += chunk.replace('\\"', '"')
+            return "Success: Chunk received"
+        if line == "fuel_gauge model get":
+            return 'Value: name="LP803448",Q={1491.63 mAh}'
+        if line == "npmx errlog get":
+            return "RSTCAUSE:\r\nSWRESET\r\nCHARGER_ERROR:\r\nSENSOR_ERROR:"
         if line.startswith("npm_adc sample"):
             return "Value: sample interval=1000, report interval=2000"
+        if line.startswith("npmx ship mode"):
+            return "Success"
         if line == "bad command":
             return "Error: unknown"
+        if "set" in words:
+            at = words.index("set")
+            key = " ".join(words[:at] + words[at + 1:-1])
+            self.values[key] = words[-1]
+            return f"Value: {words[-1]}."
+        if "get" in words:
+            at = words.index("get")
+            key = " ".join(words[:at] + words[at + 1:])
+            return f"Value: {self.values.get(key, '0')}."
         return "Value: 0."
 
 

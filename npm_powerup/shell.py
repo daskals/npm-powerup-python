@@ -62,8 +62,9 @@ class ShellDisconnected(ShellError):
 
 
 class _Pending:
-    def __init__(self, command: str):
+    def __init__(self, command: str, expect_echo: bool = True):
         self.command = command
+        self.expect_echo = expect_echo
         self.lines: list[str] = []
         # The shell wraps the echo of long commands, so match it ignoring
         # whitespace. It must stand alone: a reply such as "hw_version=..."
@@ -124,6 +125,7 @@ class ShellSession:
         self._log_listeners: list[LogListener] = []
         self._line_listeners: list[Callable[[str], None]] = []
         self._connection_listeners: list[ConnectionListener] = []
+        self._command_listeners: list[Callable[[str, str, bool], None]] = []
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -195,6 +197,13 @@ class ShellSession:
         self._connection_listeners.append(listener)
         return lambda: self._connection_listeners.remove(listener)
 
+    def on_command(
+        self, listener: Callable[[str, str, bool], None]
+    ) -> Callable[[], None]:
+        """Listen to every command sent: ``(command, reply, failed)``."""
+        self._command_listeners.append(listener)
+        return lambda: self._command_listeners.remove(listener)
+
     # -- commands ----------------------------------------------------------
 
     def sync(self, settle: float = 0.3) -> None:
@@ -205,14 +214,20 @@ class ShellSession:
             with self._cond:
                 self._pending = None
 
-    def command(self, command: str, timeout: Optional[float] = None) -> str:
+    def command(
+        self,
+        command: str,
+        timeout: Optional[float] = None,
+        expect_echo: bool = True,
+    ) -> str:
         """Run ``command`` and return its reply.
 
         Raises :class:`ShellCommandError` if the firmware reports an error.
+        Pass ``expect_echo=False`` where the firmware is known not to echo.
         """
         timeout = self._timeout if timeout is None else timeout
         with self._command_lock:
-            pending = _Pending(command)
+            pending = _Pending(command, expect_echo)
             with self._cond:
                 if not self._connected:
                     raise ShellDisconnected(f"not connected, cannot send {command!r}")
@@ -225,7 +240,10 @@ class ShellSession:
                 with self._cond:
                     self._pending = None
 
-        if _ERROR.search(response):
+        failed = bool(_ERROR.search(response))
+        for listener in list(self._command_listeners):
+            self._safely(listener, command, response, failed)
+        if failed:
             raise ShellCommandError(command, response)
         return response
 
@@ -252,6 +270,8 @@ class ShellSession:
         echo = pending.echo.search(text)
         if echo:
             return text[echo.end():].strip()
+        if not pending.expect_echo:
+            return text.strip()
         if pending.lines and time.monotonic() - self._prompt_seen > _NO_ECHO_GRACE:
             return text.strip()
         return None
