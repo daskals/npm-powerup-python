@@ -229,6 +229,12 @@ git submodule update --init
 python -m unittest discover -s tests
 ```
 
+## Licence
+
+MIT, see [LICENSE](LICENSE). This covers the code of this package only. The
+`reference` submodule is Nordic Semiconductor's code under Nordic's own
+licence.
+
 ## Acknowledgement
 
 Inspired by [ppk2-api-python](https://github.com/IRNAS/ppk2-api-python) by
